@@ -1,22 +1,14 @@
-# General-purpose training script for SplitGAN image-to-image translation
 import os
-import sys
-import time
 import torch
 import functools
 import itertools
-import numpy as np
-sys.path.append('/Users/brianreicher/Documents/GitHub/raygun/')
+
 from collections import OrderedDict
-from splitGAN_wrapper.base_options import *
-from splitGAN_wrapper.data import *
-from splitGAN_wrapper.visualizer import *
-from CycleGAN.CycleGAN_Model import *
-from CycleGAN.CycleGAN_LossFunctions import *
-from CycleGAN.CycleGAN_Optimizers import *
+from .cgan.cyclegan_model import CycleGAN_Model
+from .cgan.cyclegan_loss import CycleGAN_Loss
+from .cgan.cyclegan_optim import CycleGAN_Optimizer
 from utils import *
-from residual_unet import *
-from unet import *
+from .networks.unet import *
 
 
 # Normalization layer helper func
@@ -30,7 +22,7 @@ def get_normalization(n_dims: int):
     return norm_layer
 
 
-class SplitCycleGAN():
+class CycleGAN():
 
     def __init___(self, gnet_type, gnet_kwargs, g_init_learning_rate, dnet_type, dnet_kwargs, 
                   d_init_learning_rate, loss_kwargs, adam_betas, ndims):
@@ -132,12 +124,12 @@ class SplitCycleGAN():
         if not hasattr(self, 'netG1'):
             self.setup_networks()
         
-        self.model = CycleGAN_Split_Model(self.netG1, self.netD1, self.netG2, self.netD2)
+        self.model = CycleGAN_Model(self.netG1, self.netD1, self.netG2, self.netD2)
         self.optimizer_G1 = torch.optim.Adam(self.netG1.parameters(), lr=self.g_init_learning_rate, betas=self.adam_betas)
         self.optimizer_G2 = torch.optim.Adam(self.netG2.parameters(), lr=self.g_init_learning_rate, betas=self.adam_betas)
         self.optimizer_D = torch.optim.Adam(itertools.chain(self.netD1.parameters(), self.netD2.parameters()), lr=self.d_init_learning_rate, betas=self.adam_betas)
-        self.optimizer = Split_CycleGAN_Optimizer(self.optimizer_G1, self.optimizer_G2, self.optimizer_D)
-        self.loss = Custom_Loss(self.netD1, self.netG1, self.netD2, self.netG2, self.optimizer_G1, self.optimizer_G2, self.optimizer_D, self.ndims, **self.loss_kwargs)
+        self.optimizer = CycleGAN_Optimizer(self.optimizer_G1, self.optimizer_G2, self.optimizer_D)
+        self.loss = CycleGAN_Loss(self.netD1, self.netG1, self.netD2, self.netG2, self.optimizer_G1, self.optimizer_G2, self.optimizer_D, self.ndims, **self.loss_kwargs)
 
 
     def set_input(self, input): # pass self.real_# to self.model() (which is the CyleGAN_Split_Model)
@@ -175,87 +167,3 @@ class SplitCycleGAN():
                     net.cuda(self.gpu_ids[0])
                 else:
                     torch.save(net.cpu().state_dict(), save_path)
-
-
-if __name__ == '__main__':
-    opt = BaseOptions().parse()   # get training options
-    dataset = create_dataset(opt)  # create a dataset given opt.dataset_mode and other options
-    dataset_size = len(dataset)    # get the number of images in the dataset.
-    print('The number of training images = %d' % dataset_size)
-    
-    # TODO: initialize model
-    model = SplitCycleGAN(gnet_type='resnet',
-                          gnet_kwargs={
-                                       'input_nc': 1,
-                                       'output_nc': 1,
-                                       'activation': torch.nn.SELU,
-                                       'ngf': 64,
-                                       'n_blocks': 9, 
-                                       },
-                          g_init_learning_rate=0.00004,
-                          dnet_type='patch_gan',
-                          # TODO: update for further discriminator styles
-                          dnet_kwargs={
-                                         'input_nc': 1
-                                        },
-                          d_init_learning_rate = 0.00007, 
-                          loss_kwargs={
-                                         'l1_loss': torch.nn.SmoothL1Loss(), 
-                                         'g_lambda_dict': {'A': {'l1_loss': {'cycled': 10, 'identity': 0},
-                                                            'gan_loss': {'fake': 1, 'cycled': 0},
-                                                            },
-                                                        'B': {'l1_loss': {'cycled': 10, 'identity': 0},
-                                                            'gan_loss': {'fake': 1, 'cycled': 0},
-                                                            },
-                                                    },
-                                         'd_lambda_dict': {'A': {'real': 1, 'fake': 1, 'cycled': 0},
-                                                        'B': {'real': 1, 'fake': 1, 'cycled': 0},
-                                                    },
-                                         'gan_mode': 'lsgan'
-                                         }, 
-                          adam_betas = [0.5, 0.999], 
-                          ndims = 3)
-
-    visualizer = Visualizer(opt)   # create a visualizer that display/save images and plots
-    total_iters = 0                # the total number of training iterations
-    
-    for epoch in range(opt.epoch_count, opt.n_epochs + opt.n_epochs_decay + 1):    # outer loop for different epochs; we save the model by <epoch_count>, <epoch_count>+<save_latest_freq>
-        epoch_start_time = time.time()  # timer for entire epoch
-        iter_data_time = time.time()    # timer for data loading per iteration
-        epoch_iter = 0                  # the number of training iterations in current epoch, reset to 0 every epoch
-        visualizer.reset()              # reset the visualizer: make sure it saves the results to HTML at least once every epoch
-        # model.update_learning_rate()    # update learning rates in the beginning of every epoch.
-        for i, data in enumerate(dataset):  # inner loop within one epoch
-            iter_start_time = time.time()  # timer for computation per iteration
-            if total_iters % opt.print_freq == 0:
-                t_data = iter_start_time - iter_data_time
-
-            total_iters += opt.batch_size
-            epoch_iter += opt.batch_size
-            model.set_input(data)         # unpack data from dataset and apply preprocessing
-            model.optimize_parameters()   # calculate loss functions, get gradients, update network weights
-
-            if total_iters % opt.display_freq == 0:   # display images on visdom and save images to a HTML file
-                save_result = total_iters % opt.update_html_freq == 0
-                # model.compute_visuals()
-                visualizer.display_current_results(model.get_current_visuals(), epoch, save_result)
-
-            if total_iters % opt.print_freq == 0:    # print training losses and save logging information to the disk
-                losses = model.get_current_losses()
-                t_comp = (time.time() - iter_start_time) / opt.batch_size
-                visualizer.print_current_losses(epoch, epoch_iter, losses, t_comp, t_data)
-                if opt.display_id > 0:
-                    visualizer.plot_current_losses(epoch, float(epoch_iter) / dataset_size, losses)
-
-            if total_iters % opt.save_latest_freq == 0:   # cache our latest model every <save_latest_freq> iterations
-                print('saving the latest model (epoch %d, total_iters %d)' % (epoch, total_iters))
-                save_suffix = 'iter_%d' % total_iters if opt.save_by_iter else 'latest'
-                model.save_networks(save_suffix)
-
-            iter_data_time = time.time()
-        if epoch % opt.save_epoch_freq == 0:              # cache our model every <save_epoch_freq> epochs
-            print('saving the model at the end of epoch %d, iters %d' % (epoch, total_iters))
-            model.save_networks('latest')
-            model.save_networks(epoch)
-
-        print('End of epoch %d / %d \t Time Taken: %d sec' % (epoch, opt.n_epochs + opt.n_epochs_decay, time.time() - epoch_start_time))

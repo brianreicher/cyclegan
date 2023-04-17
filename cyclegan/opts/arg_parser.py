@@ -3,6 +3,7 @@ import os
 from utilities import util
 import torch
 import data
+from .dat
 
 
 class BaseOptions():
@@ -12,9 +13,9 @@ class BaseOptions():
     It also gathers additional options defined in <modify_commandline_options> functions in both dataset class and model class.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Reset the class; indicates the class hasn't been initailized"""
-        self.initialized = False
+        self.initialized:bool = False
 
     def initialize(self, parser):
         """Define the common options that are used in both training and test."""
