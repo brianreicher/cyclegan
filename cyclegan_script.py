@@ -7,21 +7,50 @@ import torchvision.transforms as transforms
 
 # Define the Generator and Discriminator networks
 class Generator(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, input_channels=3, output_channels=3, hidden_dim=64) -> None:
         super(Generator, self).__init__()
+        self.input_channels: int = input_channels
+        self.output_channels: int = output_channels
+        self.hidden_dim: int = hidden_dim
+
         # Define the architecture of the generator network
+        self.layers: nn.Sequential = nn.Sequential(
+            nn.Conv2d(self.input_channels, self.hidden_dim, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(self.hidden_dim, self.hidden_dim * 2, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(self.hidden_dim * 2, self.hidden_dim * 4, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(self.hidden_dim * 4, self.output_channels, kernel_size=3, padding=1),
+            nn.Tanh()
+        )
 
     def forward(self, x):
         # Define the forward pass of the generator network
+        x = self.layers(x)
         return x
 
 class Discriminator(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, input_channels=3, hidden_dim=64) -> None:
         super(Discriminator, self).__init__()
+        self.input_channels: int = input_channels
+        self.hidden_dim: int = hidden_dim
+
         # Define the architecture of the discriminator network
+        self.layers:nn.Sequential = nn.Sequential(
+            nn.Conv2d(self.input_channels, self.hidden_dim, kernel_size=4, stride=2, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(self.hidden_dim, self.hidden_dim * 2, kernel_size=4, stride=2, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(self.hidden_dim * 2, self.hidden_dim * 4, kernel_size=4, stride=2, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(self.hidden_dim * 4, 1, kernel_size=4, stride=1, padding=0),
+            nn.Sigmoid()
+        )
 
     def forward(self, x):
         # Define the forward pass of the discriminator network
+        x = self.layers(x)
         return x
 
 # Define the CycleGAN model
@@ -34,27 +63,17 @@ class CycleGAN(nn.Module):
         self.discriminator_B = discriminator_B
 
     def forward(self, real_A, real_B) -> tuple:
-        if real_A is not None: #allow calling for single direction pass (i.e. prediction)
-            fake_B = self.netG1(real_A)
-            if self.crop_pad is not False: fake_B = fake_B[..., self.crop_pad:-self.crop_pad, self.crop_pad:-self.crop_pad]
-            if self.scale_factor_B: fake_B = self.sampling_bottleneck(fake_B, self.scale_factor_B) #apply sampling bottleneck
-            if self.cycle:                
-                cycled_A = self.netG2(fake_B)
-                if self.crop_pad is not False: cycled_A = cycled_A[..., self.crop_pad:-self.crop_pad, self.crop_pad:-self.crop_pad]
-            else:
-                cycled_A = None
+        if real_A is not None:
+            fake_B = self.generator_A(real_A)
+            cycled_A = None
         else:
             fake_B: None = None
             cycled_A: None = None
+
         if real_B is not None:
-            fake_A = self.netG2(real_B)
-            if self.crop_pad is not False: fake_A = fake_A[..., self.crop_pad:-self.crop_pad, self.crop_pad:-self.crop_pad]
-            if self.scale_factor_A: fake_A = self.sampling_bottleneck(fake_A, self.scale_factor_A) #apply sampling bottleneck
-            if self.cycle:
-                cycled_B = self.netG1(fake_A)
-                if self.crop_pad is not False: cycled_B = cycled_B[..., self.crop_pad:-self.crop_pad, self.crop_pad:-self.crop_pad]
-            else:
-                cycled_B = None
+            fake_A = self.generator_B(real_B)
+            cycled_B = None
+            
         else:
             fake_A: None = None
             cycled_B: None = None
@@ -90,11 +109,11 @@ if __name__ == '__main__':
     ])
 
     # Create the data loader for dataset A
-    dataset_A: ImageDataset = ImageDataset('path/to/dataset_A', transform=transform)
+    dataset_A: ImageDataset = ImageDataset('./data/cezanne2photo', transform=transform)
     dataloader_A = DataLoader(dataset_A, batch_size=batch_size, shuffle=True, num_workers=4)
 
     # Create the data loader for dataset B
-    dataset_B: ImageDataset = ImageDataset('path/to/dataset_B', transform=transform)
+    dataset_B: ImageDataset = ImageDataset('./data/cezanne2photo', transform=transform)
     dataloader_B = DataLoader(dataset_B, batch_size=batch_size, shuffle=True, num_workers=4)
 
     # Initialize the Generator and Discriminator networks
@@ -124,7 +143,7 @@ if __name__ == '__main__':
     discriminator_B.to(device)
     dataloader_A: DataLoader = DataLoader(dataset_A, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
     dataloader_B: DataLoader = DataLoader(dataset_B, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
-    
+
     # Training loop
     for epoch in range(epochs):
         for batch_idx, (real_A, real_B) in enumerate(zip(dataloader_A, dataloader_B)):
