@@ -4,8 +4,11 @@ import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 from torch.autograd import Variable
 from PIL import Image
+import imageio
+import numpy as np
 import torch
 import sys
+import os
 from tqdm import tqdm
 
 sys.path.append('/Users/brianreicher/Documents/GitHub/cyclegan')
@@ -15,12 +18,11 @@ from models import Discriminator
 from data import ImageDataset
 from utils import ReplayBuffer
 from utils import LambdaLR
-from utils import Logger
 from utils import weights_init_normal
 from data import ImageDataset
 
 parser: argparse.ArgumentParser = argparse.ArgumentParser()
-parser.add_argument('--epoch', type=int, default=110, help='starting epoch')
+parser.add_argument('--epoch', type=int, default=1, help='starting epoch')
 parser.add_argument('--n_epochs', type=int, default=200, help='number of epochs of training')
 parser.add_argument('--batchSize', type=int, default=1, help='size of the batches')
 parser.add_argument('--dataroot', type=str, default='./datasets/cezanne2photo/', help='root directory of the dataset')
@@ -39,10 +41,10 @@ if torch.cuda.is_available() and not opt.cuda:
 
 ###### Definition of variables ######
 # Networks
-netG_A2B = Generator(opt.input_nc, opt.output_nc)
-netG_B2A = Generator(opt.output_nc, opt.input_nc)
-netD_A = Discriminator(opt.input_nc)
-netD_B = Discriminator(opt.output_nc)
+netG_A2B: Generator = Generator(opt.input_nc, opt.output_nc)
+netG_B2A: Generator = Generator(opt.output_nc, opt.input_nc)
+netD_A: Discriminator = Discriminator(opt.input_nc)
+netD_B: Discriminator = Discriminator(opt.output_nc)
 
 if opt.cuda:
     netG_A2B.cuda()
@@ -89,11 +91,7 @@ transforms_ = [ transforms.Resize(int(opt.size*1.12), Image.BICUBIC),
 
     
 dataloader = DataLoader(ImageDataset(opt.dataroot, transforms_=transforms_, unaligned=True), 
-                        batch_size=opt.batchSize, shuffle=True, num_workers=opt.n_cpu)
-
-# Loss plot
-# logger = Logger(opt.n_epochs, len(dataloader))
-###################################
+                        batch_size=opt.batchSize, shuffle=False, num_workers=opt.n_cpu)
 
 
 ###### Training ######
@@ -102,8 +100,8 @@ for epoch in range(opt.epoch, opt.n_epochs):
     for i, batch in tqdm(enumerate(dataloader)):
 
         # Set model input
-        real_A = Variable(input_A.copy_(batch['A']))
-        real_B = Variable(input_B.copy_(batch['B']))
+        real_A: Variable = Variable(input_A.copy_(batch['A']))
+        real_B: Variable = Variable(input_B.copy_(batch['B']))
 
         ###### Generators A2B and B2A ######
         optimizer_G.zero_grad()
@@ -111,10 +109,10 @@ for epoch in range(opt.epoch, opt.n_epochs):
         # Identity loss
         # G_A2B(B) should equal B if real B is fed
         same_B = netG_A2B(real_B)
-        print("breakpoint1")
+
 
         loss_identity_B = criterion_identity(same_B, real_B)*5.0
-        print("breakpoint2")
+
         # G_B2A(A) should equal A if real A is fed
         same_A = netG_B2A(real_A)
         loss_identity_A = criterion_identity(same_A, real_A)*5.0
@@ -180,10 +178,23 @@ for epoch in range(opt.epoch, opt.n_epochs):
         optimizer_D_B.step()
         ###################################
 
-        # Progress report (http://localhost:8097)
         print({'loss_G': loss_G, 'loss_G_identity': (loss_identity_A + loss_identity_B), 'loss_G_GAN': (loss_GAN_A2B + loss_GAN_B2A),
                     'loss_G_cycle': (loss_cycle_ABA + loss_cycle_BAB), 'loss_D': (loss_D_A + loss_D_B)})
-        print({'real_A': real_A, 'real_B': real_B, 'fake_A': fake_A, 'fake_B': fake_B})
+
+        iter_imgs: dict = {
+            'real_A': ((real_A+1)/2).squeeze().detach().cpu().numpy(),
+            'real_B': ((real_B+1)/2).squeeze().detach().cpu().numpy(),
+            'fake_A': ((fake_A+1)/2).squeeze().detach().cpu().numpy(),
+            'fake_B': ((fake_B+1)/2).squeeze().detach().cpu().numpy()
+        }
+
+        if not os.path.exists('./results'):
+            os.makedirs('./results')
+
+        # Save the rendered grid to disk as an image
+        for key, im in iter_imgs.items():
+            imageio.imwrite(f'./results/{key}_{i}.png', np.transpose(im, (1, 2, 0)))
+
 
     # Update learning rates
     lr_scheduler_G.step()
@@ -195,4 +206,3 @@ for epoch in range(opt.epoch, opt.n_epochs):
     torch.save(netG_B2A.state_dict(), 'output/netG_B2A.pth')
     torch.save(netD_A.state_dict(), 'output/netD_A.pth')
     torch.save(netD_B.state_dict(), 'output/netD_B.pth')
-###################################
