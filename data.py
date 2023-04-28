@@ -6,16 +6,16 @@ import torchvision.transforms as transforms
 
 # ADAPTED FROM https://github.com/aitorzip/PyTorch-CycleGAN
 class DataClass(Dataset):
-    def __init__(self, root, tforms=None, mode='train') -> None:
+    def __init__(self, data_directory, tforms=None) -> None:
         self.transform: transforms.Compose = transforms.Compose(tforms)
-        self.files_A: list[str] = sorted(glob.glob(os.path.join(root, '%s/A' % mode) + '/*.*'))
-        self.files_B: list[str] = sorted(glob.glob(os.path.join(root, '%s/B' % mode) + '/*.*'))
+        self.files_A: list[str] = glob.glob(os.path.join(data_directory, 'train/A') + '/*.*')
+        self.files_B: list[str] = glob.glob(os.path.join(data_directory, 'train/B') + '/*.*')
 
-    def __getitem__(self, index) -> dict:
-        item_A: Image = self.transform(Image.open(self.files_A[index % len(self.files_A)]))
-        item_B:Image = self.transform(Image.open(self.files_B[index % len(self.files_B)]))
+    def __getitem__(self, idx) -> dict:
+        iA: Image = self.transform(Image.open(self.files_A[idx % len(self.files_A)]))
+        iB:Image = self.transform(Image.open(self.files_B[idx % len(self.files_B)]))
 
-        return {'A': item_A, 'B': item_B}
+        return {'A': iA, 'B': iB}
 
     def __len__(self) -> int:
         return max(len(self.files_A), len(self.files_B))
