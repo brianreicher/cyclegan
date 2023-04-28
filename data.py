@@ -1,13 +1,13 @@
 import glob
-import random
 import os
 from torch.utils.data import Dataset
 from PIL import Image
 import torchvision.transforms as transforms
 
-class ImageDataset(Dataset):
-    def __init__(self, root, transforms=None, unaligned=False, mode='train') -> None:
-        self.transform: transforms.Compose = transforms.Compose(transforms)
+# ADAPTED FROM https://github.com/aitorzip/PyTorch-CycleGAN
+class DataClass(Dataset):
+    def __init__(self, root, tforms=None, mode='train') -> None:
+        self.transform: transforms.Compose = transforms.Compose(tforms)
         self.files_A: list[str] = sorted(glob.glob(os.path.join(root, '%s/A' % mode) + '/*.*'))
         self.files_B: list[str] = sorted(glob.glob(os.path.join(root, '%s/B' % mode) + '/*.*'))
 

@@ -1,6 +1,9 @@
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+# ADAPTED FROM https://github.com/aitorzip/PyTorch-CycleGAN neeed to ResidualBlock, could not develop specific network architecturces myself that created sufficient results
+
 class ResidualBlock(nn.Module):
     def __init__(self, in_features) -> None:
         super(ResidualBlock, self).__init__()
@@ -65,7 +68,7 @@ class Discriminator(nn.Module):
     def __init__(self, input_nc):
         super(Discriminator, self).__init__()
 
-        # A bunch of convolutions one after another
+        # repeated convolutional passes to extract features
         model = [   nn.Conv2d(input_nc, 64, 4, stride=2, padding=1),
                     nn.LeakyReLU(0.2, inplace=True) ]
 
@@ -84,6 +87,7 @@ class Discriminator(nn.Module):
         # FCN classification layer
         model += [nn.Conv2d(512, 1, 4, padding=1)]
 
+        # pass convs to squential model
         self.model = nn.Sequential(*model)
 
     def forward(self, x):

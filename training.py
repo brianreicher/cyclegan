@@ -1,4 +1,3 @@
-import argparse
 import itertools
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
@@ -10,199 +9,241 @@ import torch
 import sys
 import os
 from tqdm import tqdm
+from matplotlib import pyplot as plt
 
 sys.path.append('/Users/brianreicher/Documents/GitHub/cyclegan')
 
+# self written function imports
 from models import Generator
 from models import Discriminator
-from data import ImageDataset
 from utils import ReplayBuffer
-from utils import LambdaLR
-from utils import weights_init_normal
-from data import ImageDataset
+from data import DataClass
 
-parser: argparse.ArgumentParser = argparse.ArgumentParser()
-parser.add_argument('--epoch', type=int, default=1, help='starting epoch')
-parser.add_argument('--n_epochs', type=int, default=200, help='number of epochs of training')
-parser.add_argument('--batchSize', type=int, default=1, help='size of the batches')
-parser.add_argument('--dataroot', type=str, default='./datasets/cezanne2photo/', help='root directory of the dataset')
-parser.add_argument('--lr', type=float, default=0.0002, help='initial learning rate')
-parser.add_argument('--decay_epoch', type=int, default=100, help='epoch to start linearly decaying the learning rate to 0')
-parser.add_argument('--size', type=int, default=256, help='size of the data crop (squared assumed)')
-parser.add_argument('--input_nc', type=int, default=3, help='number of channels of input data')
-parser.add_argument('--output_nc', type=int, default=3, help='number of channels of output data')
-parser.add_argument('--cuda', action='store_true', help='use GPU computation')
-parser.add_argument('--n_cpu', type=int, default=8, help='number of cpu threads to use during batch generation')
-opt = parser.parse_args()
-print(opt)
 
-if torch.cuda.is_available() and not opt.cuda:
-    print("WARNING: You have a CUDA device, so you should probably run with --cuda")
+class CycleGAN():
+    """
+        Focused on this code -- network architecures very specifc to image channels, wanted to enforce a proper training pipeline for generators and discriminators.
+    """
+    def __init__(self, data_dr:str, input_nc=3, output_nc=3, lr=0.0002, batch_size=1) -> None:
+        # general params
+        self.input_nc: int = input_nc
+        self.output_nc: int = output_nc
+        self.lr: float = lr
+        self.batch_size: int = batch_size
+        self.data_directory: str = data_dr
 
-###### Definition of variables ######
-# Networks
-netG_A2B: Generator = Generator(opt.input_nc, opt.output_nc)
-netG_B2A: Generator = Generator(opt.output_nc, opt.input_nc)
-netD_A: Discriminator = Discriminator(opt.input_nc)
-netD_B: Discriminator = Discriminator(opt.output_nc)
+        # initialize networks
+        self.generator_A2B = None
+        self.generator_B2A = None
+        self.discriminator_A = None
+        self.discriminator_B = None
 
-if opt.cuda:
-    netG_A2B.cuda()
-    netG_B2A.cuda()
-    netD_A.cuda()
-    netD_B.cuda()
+        # initialize dataloder
+        self.dataloader = None
 
-netG_A2B.apply(weights_init_normal)
-netG_B2A.apply(weights_init_normal)
-netD_A.apply(weights_init_normal)
-netD_B.apply(weights_init_normal)
+        # initialize loss functions
+        self.gan_loss: torch.nn.MSELoss = torch.nn.MSELoss()
+        self.cycle_loss: torch.nn.L1Loss = torch.nn.L1Loss()
+        self.id_loss: torch.nn.L1Loss = torch.nn.L1Loss()
 
-# Lossess
-criterion_GAN = torch.nn.MSELoss()
-criterion_cycle = torch.nn.L1Loss()
-criterion_identity = torch.nn.L1Loss()
 
-# Optimizers & LR schedulers
-optimizer_G = torch.optim.Adam(itertools.chain(netG_A2B.parameters(), netG_B2A.parameters()),
-                                lr=opt.lr, betas=(0.5, 0.999))
-optimizer_D_A = torch.optim.Adam(netD_A.parameters(), lr=opt.lr, betas=(0.5, 0.999))
-optimizer_D_B = torch.optim.Adam(netD_B.parameters(), lr=opt.lr, betas=(0.5, 0.999))
+        # data memory space constraints
+        Tensor:torch.Tensor = torch.Tensor
+        self.input_A:Tensor = Tensor(self.batch_size, self.input_nc, 256, 256)
+        self.input_B:Tensor = Tensor(self.batch_size, self.output_nc, 256, 256)
 
-lr_scheduler_G = torch.optim.lr_scheduler.LambdaLR(optimizer_G, lr_lambda=LambdaLR(opt.n_epochs, opt.epoch, opt.decay_epoch).step)
-lr_scheduler_D_A = torch.optim.lr_scheduler.LambdaLR(optimizer_D_A, lr_lambda=LambdaLR(opt.n_epochs, opt.epoch, opt.decay_epoch).step)
-lr_scheduler_D_B = torch.optim.lr_scheduler.LambdaLR(optimizer_D_B, lr_lambda=LambdaLR(opt.n_epochs, opt.epoch, opt.decay_epoch).step)
+        # tensor holders for output tensors
+        self.output_Real: Variable = Variable(Tensor(self.batch_size).fill_(1.0), requires_grad=False)
+        self.output_Generated: Variable = Variable(Tensor(self.batch_size).fill_(0.0), requires_grad=False)
 
-# Inputs & targets memory allocation
-Tensor = torch.cuda.FloatTensor if opt.cuda else torch.Tensor
-input_A = Tensor(opt.batchSize, opt.input_nc, opt.size, opt.size)
-input_B = Tensor(opt.batchSize, opt.output_nc, opt.size, opt.size)
-target_real = Variable(Tensor(opt.batchSize).fill_(1.0), requires_grad=False)
-target_fake = Variable(Tensor(opt.batchSize).fill_(0.0), requires_grad=False)
+        # initialize buffers for generated data
+        self.generated_A_buffer: ReplayBuffer = ReplayBuffer()
+        self.generated_B_buffer: ReplayBuffer = ReplayBuffer()
 
-fake_A_buffer = ReplayBuffer()
-fake_B_buffer = ReplayBuffer()
+    def build_pipeline(self) -> None:
+        # initialize actual networks
+        self.generator_A2B: Generator = Generator(self.input_nc, self.output_nc)
+        self.generator_B2A: Generator = Generator(self.output_nc, self.input_nc)
+        self.discriminator_A: Discriminator = Discriminator(self.input_nc)
+        self.discriminator_B: Discriminator = Discriminator(self.output_nc)
 
-# Dataset loader
-transforms_ = [ transforms.Resize(int(opt.size*1.12), Image.BICUBIC), 
-                transforms.RandomCrop(opt.size), 
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5)) ]
+        def weights_init_normal(m) -> None:
+            """
+                Helper function to initalize weights depending on Convolutional or BatchNormilization class names
+            """
+            classname = m.__class__.__name__
+            if classname.find('Conv') != -1:
+                torch.nn.init.normal(m.weight.data, 0.0, 0.02)
+            elif classname.find('BatchNorm2d') != -1:
+                torch.nn.init.normal(m.weight.data, 1.0, 0.02)
+                torch.nn.init.constant(m.bias.data, 0.0)
+
+        # apply initial weights for first forward pass
+        self.generator_A2B.apply(weights_init_normal)
+        self.generator_B2A.apply(weights_init_normal)
+        self.discriminator_A.apply(weights_init_normal)
+        self.discriminator_B.apply(weights_init_normal)
+
+        # apply optimizers to the networks, for backpropagation purposes, with given learning rate
+        # used ADAM optimizer instead of GD or SGD, need to create for the total generators and each discriminator
+        self.generator_optimizer = torch.optim.Adam(itertools.chain(self.generator_A2B.parameters(), self.generator_B2A.parameters()), lr=self.lr, betas=(0.5, 0.997))
+        self.discriminator_A_optimizer = torch.optim.Adam(self.discriminator_A.parameters(), lr=self.lr, betas=(0.5, 0.997))
+        self.discriminator_B_optimizer = torch.optim.Adam(self.discriminator_B.parameters(), lr=self.lr, betas=(0.5, 0.997))
+
+    def load_data(self) -> None:
+        """
+            Load the image data directory to the dataloader object
+        """
+
+        # transform list to apply to images, using specific parameters tested by previous networks
+        tform:list = [ transforms.Resize(int(256*1.5), Image.BICUBIC), 
+                        transforms.RandomCrop(256), 
+                        transforms.ToTensor(),
+                        transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5)) ]
 
     
-dataloader = DataLoader(ImageDataset(opt.dataroot, transforms_=transforms_, unaligned=True), 
-                        batch_size=opt.batchSize, shuffle=False, num_workers=opt.n_cpu)
+        self.dataloader:DataLoader = DataLoader(DataClass(self.data_directory, tforms=tform), 
+                                                batch_size=self.batch_size, num_workers=4)
+
+    def train(self, n_epochs:int, display_loss=True, save_img=False) -> None:
+        """
+            Train the initialized networks
+        """
+        # cumulative loss lists for plotting
+        loss_G_list:list = []
+        loss_G_identity_list:list = []
+        loss_G_GAN_list:list = []
+        loss_G_cycle_list:list = []
+        loss_D_list:list = []
+
+        for _ in tqdm(range(n_epochs)):
+            # iterate for a given number of epochs
+            for i, batch in enumerate(self.dataloader):
+                # iterate over each item and batch in the dataloader
 
 
-###### Training ######
-for epoch in range(opt.epoch, opt.n_epochs):
+                # establish iteration input
+                real_A: Variable = Variable(self.input_A.copy_(batch['A']))
+                real_B: Variable = Variable(self.input_B.copy_(batch['B']))
 
-    for i, batch in tqdm(enumerate(dataloader)):
+                # TRAIN BOTH GENERATORS, FROM STYLE A->B and B->A WITH CYCLES
+                self.generator_optimizer.zero_grad()
 
-        # Set model input
-        real_A: Variable = Variable(input_A.copy_(batch['A']))
-        real_B: Variable = Variable(input_B.copy_(batch['B']))
-
-        ###### Generators A2B and B2A ######
-        optimizer_G.zero_grad()
-
-        # Identity loss
-        # G_A2B(B) should equal B if real B is fed
-        same_B = netG_A2B(real_B)
+                # Identity loss
+                same_B = self.generator_A2B(real_B)
 
 
-        loss_identity_B = criterion_identity(same_B, real_B)*5.0
+                loss_identity_B = self.id_loss(same_B, real_B)*7.0
 
-        # G_B2A(A) should equal A if real A is fed
-        same_A = netG_B2A(real_A)
-        loss_identity_A = criterion_identity(same_A, real_A)*5.0
+                same_A = self.generator_B2A(real_A)
+                loss_identity_A = self.id_loss(same_A, real_A)*7.0
 
-        # GAN loss
-        fake_B = netG_A2B(real_A)
-        pred_fake = netD_B(fake_B)
-        loss_GAN_A2B = criterion_GAN(pred_fake, target_real)
+                fake_B = self.generator_A2B(real_A)
+                pred_fake = self.discriminator_B(fake_B)
+                loss_GAN_A2B = self.gan_loss(pred_fake, self.output_Real)
 
-        fake_A = netG_B2A(real_B)
-        pred_fake = netD_A(fake_A)
-        loss_GAN_B2A = criterion_GAN(pred_fake, target_real)
+                fake_A = self.generator_B2A(real_B)
+                pred_fake = self.discriminator_A(fake_A)
+                loss_GAN_B2A = self.gan_loss(pred_fake, self.output_Real)
 
-        # Cycle loss
-        recovered_A = netG_B2A(fake_B)
-        loss_cycle_ABA = criterion_cycle(recovered_A, real_A)*10.0
+                recon_A = self.generator_B2A(fake_B)
+                loss_cycle_ABA = self.cycle_loss(recon_A, real_A)*9.0
 
-        recovered_B = netG_A2B(fake_A)
-        loss_cycle_BAB = criterion_cycle(recovered_B, real_B)*10.0
+                recon_B = self.generator_A2B(fake_A)
+                loss_cycle_BAB = self.cycle_loss(recon_B, real_B)*9.0
 
-        # Total loss
-        loss_G = loss_identity_A + loss_identity_B + loss_GAN_A2B + loss_GAN_B2A + loss_cycle_ABA + loss_cycle_BAB
-        loss_G.backward()
-        
-        optimizer_G.step()
-        ###################################
+                # total generator loss
+                loss_G = loss_identity_A + loss_identity_B + loss_GAN_A2B + loss_GAN_B2A + loss_cycle_ABA + loss_cycle_BAB
+                loss_G.backward()
+                
+                self.generator_optimizer.step()
+            
 
-        ###### Discriminator A ######
-        optimizer_D_A.zero_grad()
+                # TRAIN A-STYLE DISCRIMINATOR
+                self.discriminator_A_optimizer.zero_grad()
 
-        # Real loss
-        pred_real = netD_A(real_A)
-        loss_D_real = criterion_GAN(pred_real, target_real)
+                # real
+                pred_real = self.discriminator_A(real_A)
+                loss_D_real = self.gan_loss(pred_real, self.output_Real)
 
-        # Fake loss
-        fake_A = fake_A_buffer.push_and_pop(fake_A)
-        pred_fake = netD_A(fake_A.detach())
-        loss_D_fake = criterion_GAN(pred_fake, target_fake)
+                # generated
+                fake_A = self.generated_A_buffer.push_and_pop(fake_A)
+                pred_fake = self.discriminator_A(fake_A.detach())
+                loss_D_fake = self.gan_loss(pred_fake, self.output_Generated)
 
-        # Total loss
-        loss_D_A = (loss_D_real + loss_D_fake)*0.5
-        loss_D_A.backward()
+                # compound loss
+                loss_D_A = loss_D_real + loss_D_fake
+                loss_D_A.backward()
 
-        optimizer_D_A.step()
-        ###################################
-
-        ###### Discriminator B ######
-        optimizer_D_B.zero_grad()
-
-        # Real loss
-        pred_real = netD_B(real_B)
-        loss_D_real = criterion_GAN(pred_real, target_real)
-        
-        # Fake loss
-        fake_B = fake_B_buffer.push_and_pop(fake_B)
-        pred_fake = netD_B(fake_B.detach())
-        loss_D_fake = criterion_GAN(pred_fake, target_fake)
-
-        # Total loss
-        loss_D_B = (loss_D_real + loss_D_fake)*0.5
-        loss_D_B.backward()
-
-        optimizer_D_B.step()
-        ###################################
-
-        print({'loss_G': loss_G, 'loss_G_identity': (loss_identity_A + loss_identity_B), 'loss_G_GAN': (loss_GAN_A2B + loss_GAN_B2A),
-                    'loss_G_cycle': (loss_cycle_ABA + loss_cycle_BAB), 'loss_D': (loss_D_A + loss_D_B)})
-
-        iter_imgs: dict = {
-            'real_A': ((real_A+1)/2).squeeze().detach().cpu().numpy(),
-            'real_B': ((real_B+1)/2).squeeze().detach().cpu().numpy(),
-            'fake_A': ((fake_A+1)/2).squeeze().detach().cpu().numpy(),
-            'fake_B': ((fake_B+1)/2).squeeze().detach().cpu().numpy()
-        }
-
-        if not os.path.exists('./results'):
-            os.makedirs('./results')
-
-        # Save the rendered grid to disk as an image
-        for key, im in iter_imgs.items():
-            imageio.imwrite(f'./results/{key}_{i}.png', np.transpose(im, (1, 2, 0)))
+                self.discriminator_A_optimizer.step()
 
 
-    # Update learning rates
-    lr_scheduler_G.step()
-    lr_scheduler_D_A.step()
-    lr_scheduler_D_B.step()
+                # TRAIN B-STYLE DISCRIMINATOR
+                self.discriminator_B_optimizer.zero_grad()
 
-    # Save models checkpoints
-    torch.save(netG_A2B.state_dict(), 'output/netG_A2B.pth')
-    torch.save(netG_B2A.state_dict(), 'output/netG_B2A.pth')
-    torch.save(netD_A.state_dict(), 'output/netD_A.pth')
-    torch.save(netD_B.state_dict(), 'output/netD_B.pth')
+                # real
+                pred_real = self.discriminator_B(real_B)
+                loss_D_real = self.gan_loss(pred_real, self.output_Real)
+                
+                # generated
+                fake_B = self.generated_B_buffer.push_and_pop(fake_B)
+                pred_fake = self.discriminator_B(fake_B.detach())
+                loss_D_fake = self.gan_loss(pred_fake, self.output_Generated)
+
+                # compound loss
+                loss_D_B = loss_D_real + loss_D_fake
+                loss_D_B.backward()
+
+                self.discriminator_B_optimizer.step()
+
+
+                if display_loss:
+                    losses = {'loss_G': loss_G, 'loss_G_identity': (loss_identity_A + loss_identity_B), 'loss_G_GAN': (loss_GAN_A2B + loss_GAN_B2A),
+                                'loss_G_cycle': (loss_cycle_ABA + loss_cycle_BAB), 'loss_D': (loss_D_A + loss_D_B)}
+                    print(losses)
+                    loss_G_list.append(losses['loss_G'].item())
+                    loss_G_identity_list.append(losses['loss_G_identity'].item())
+                    loss_G_GAN_list.append(losses['loss_G_GAN'].item())
+                    loss_G_cycle_list.append(losses['loss_G_cycle'].item())
+                    loss_D_list.append(losses['loss_D'].item())
+                    plt.close('all')
+
+                    # create a line plot for each loss
+                    plt.plot(loss_G_list, label='loss_G')
+                    plt.plot(loss_G_identity_list, label='loss_G_identity')
+                    plt.plot(loss_G_GAN_list, label='loss_G_GAN')
+                    plt.plot(loss_G_cycle_list, label='loss_G_cycle')
+                    plt.plot(loss_D_list, label='loss_D')
+
+                    # add title, labels, and legend to the plot
+                    plt.title('CycleGAN Loss over Time')
+                    plt.xlabel('Iteration')
+                    plt.ylabel('Loss')
+                    plt.legend()
+
+                    # show the plot
+                    plt.show()
+
+
+                if save_img:
+                    iter_imgs: dict = {
+                        'real_A': ((real_A+1)/2).squeeze().detach().cpu().numpy(),
+                        'real_B': ((real_B+1)/2).squeeze().detach().cpu().numpy(),
+                        'fake_A': ((fake_A+1)/2).squeeze().detach().cpu().numpy(),
+                        'fake_B': ((fake_B+1)/2).squeeze().detach().cpu().numpy()
+                    }
+
+                    if not os.path.exists('./results'):
+                        os.makedirs('./results')
+
+                    # Save the rendered grid to disk as an image
+                    for key, im in iter_imgs.items():
+                        imageio.imwrite(f'./results/{key}_{i}.png', np.transpose(im, (1, 2, 0)))
+
+
+if __name__ == '__main__':
+    cgan:CycleGAN = CycleGAN(data_dr='./datasets/cezanne2photo')
+    cgan.build_pipeline()
+    cgan.load_data()
+
+    cgan.train(n_epochs=200, display_loss=True, save_img=False)
