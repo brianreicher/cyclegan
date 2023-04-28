@@ -242,8 +242,14 @@ class CycleGAN():
 
 
 if __name__ == '__main__':
+    # create CycleGAN object with correct data directory
     cgan:CycleGAN = CycleGAN(data_dr='./datasets/cezanne2photo')
+
+    # build the network pipelines
     cgan.build_pipeline()
+
+    # load all data into batches
     cgan.load_data()
 
+    # execute training on a desired number of epochs with given display/save options
     cgan.train(n_epochs=200, display_loss=True, save_img=False)
